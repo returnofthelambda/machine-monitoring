@@ -4,4 +4,6 @@ __pycache__/
 *.duckdb.wal
 .venv/
 build/
+build_output/
+*.bin
 .vscode/

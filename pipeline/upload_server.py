@@ -158,6 +158,36 @@ def upload_audio():
         print(f"[ERROR] Failed to process upload: {e}")
         return jsonify({"error": str(e)}), 500
 
+OTA_DIR = os.path.join(BASE_DIR, "static", "ota")
+os.makedirs(OTA_DIR, exist_ok=True)
+
+@app.route('/ota/<path:filename>', methods=['GET'])
+@app.route('/api/uploadfile', methods=['GET'])
+def serve_ota_file(filename='firmware.bin'):
+    target_file = filename if filename else 'firmware.bin'
+    if request.path == '/api/uploadfile':
+        target_file = 'firmware.bin'
+    file_path = os.path.join(OTA_DIR, target_file)
+    if not os.path.exists(file_path):
+        print(f"[OTA] Requested firmware binary not found: {file_path}")
+        return jsonify({"error": f"Firmware binary {target_file} not found"}), 404
+    print(f"[OTA] Serving firmware binary {target_file} ({os.path.getsize(file_path)} bytes) to {request.remote_addr}")
+    return send_from_directory(OTA_DIR, target_file, as_attachment=True, mimetype='application/octet-stream')
+
+@app.route('/ota/info', methods=['GET'])
+def get_ota_info():
+    target_file = os.path.join(OTA_DIR, 'firmware.bin')
+    if os.path.exists(target_file):
+        stat = os.stat(target_file)
+        return jsonify({
+            "exists": True,
+            "filename": "firmware.bin",
+            "size_bytes": stat.st_size,
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "updated_at": datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        })
+    return jsonify({"exists": False, "message": "No firmware.bin staged yet"})
+
 if __name__ == '__main__':
-    print(f"Starting upload server on 0.0.0.0:5000, serving audio from {UPLOAD_DIR}")
+    print(f"Starting upload server on 0.0.0.0:5000, serving audio from {UPLOAD_DIR} and OTA from {OTA_DIR}")
     app.run(host='0.0.0.0', port=5000)

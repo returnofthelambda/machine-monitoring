@@ -75,8 +75,38 @@ def on_message(client, userdata, msg):
 
         conn = get_duckdb_connection()
 
-        if topic.endswith("/telemetry") or "running_baseline" in payload:
-            # Periodic Telemetry Heartbeat Stream
+        if topic.endswith("/telemetry/batch") or "samples" in payload:
+            # Batch Telemetry Ingestion (Store-and-Forward duty cycle)
+            m_id = payload.get("machine_id", "UNKNOWN")
+            samples = payload.get("samples", [])
+            if samples:
+                latest_uptime = samples[-1].get("u", samples[-1].get("uptime_seconds", 0))
+                for pt in samples:
+                    state = pt.get("s", pt.get("machine_state", "IDLE"))
+                    baseline = float(pt.get("b", pt.get("running_baseline", 0.0)))
+                    peak = float(pt.get("p", pt.get("peak_amplitude", 0.0)))
+                    uptime = int(pt.get("u", pt.get("uptime_seconds", 0)))
+                    
+                    # Backdate sample time relative to current UTC arrival
+                    offset_sec = max(0, latest_uptime - uptime)
+                    sample_dt = now - datetime.timedelta(seconds=offset_sec)
+                    
+                    conn.execute("""
+                        INSERT INTO machine_telemetry_stream (
+                            id, machine_id, machine_state, running_baseline, peak_amplitude, uptime_seconds, recorded_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        str(uuid.uuid4()),
+                        m_id,
+                        state,
+                        baseline,
+                        peak,
+                        uptime,
+                        sample_dt
+                    ))
+                print(f"[STREAM] Batch ingested: {m_id} | {len(samples)} heartbeats processed.")
+        elif topic.endswith("/telemetry") or "running_baseline" in payload:
+            # Single Telemetry Heartbeat Stream
             conn.execute("""
                 INSERT INTO machine_telemetry_stream (
                     id, machine_id, machine_state, running_baseline, peak_amplitude, uptime_seconds, recorded_at
@@ -124,5 +154,6 @@ client.on_message = on_message
 client.connect(MQTT_HOST, MQTT_PORT, 60)
 client.subscribe("factory/+/anomalies")
 client.subscribe("factory/+/telemetry")
+client.subscribe("factory/+/telemetry/batch")
 print(f"Ingestion service connected to {MQTT_HOST}:{MQTT_PORT} (subscribing to anomalies & telemetry streams)")
 client.loop_forever()

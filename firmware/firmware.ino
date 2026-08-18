@@ -8,8 +8,12 @@
 #include "AmebaFatFS.h"
 #include "Base64.h"
 
-// Realtek SDK C API to disable the built-in auto-reconnect thread
-extern "C" int wifi_config_autoreconnect(unsigned char, unsigned char, unsigned short);
+// Realtek SDK C API to disable the built-in auto-reconnect thread and handle OTA
+extern "C" {
+  int wifi_config_autoreconnect(unsigned char, unsigned char, unsigned short);
+  int http_update_ota(char *host, int port, char *resource);
+  void ota_platform_reset(void);
+}
 
 #ifndef WIFI_SSID
 #define WIFI_SSID "FALLBACK_SSID"
@@ -244,6 +248,61 @@ void setup_wifi() {
   Serial.println(WiFi.localIP());
 }
 
+void trigger_ota_update(const char* host, int port, const char* resource_path) {
+  Serial.print("\n[OTA] ========================================\n");
+  Serial.print("[OTA] Starting OTA Firmware Download from: http://");
+  Serial.print(host);
+  Serial.print(":");
+  Serial.print(port);
+  Serial.print("/");
+  Serial.println(resource_path);
+  Serial.println("[OTA] Target flash: Partition Slot B");
+
+  // Unlink MP4 recording to free resources during firmware flash
+  if (mp4.getRecordingState() == 1) {
+    mp4.begin();
+  }
+
+  int ret = http_update_ota((char*)host, port, (char*)resource_path);
+  if (ret == 0) {
+    Serial.println("[OTA] Firmware successfully downloaded and verified!");
+    Serial.println("[OTA] Rebooting into updated firmware slot...");
+    delay(1000);
+    ota_platform_reset();
+  } else {
+    Serial.print("[OTA] ERROR: OTA Update failed with return code: ");
+    Serial.println(ret);
+  }
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+  char msg[256];
+  if (length >= sizeof(msg)) length = sizeof(msg) - 1;
+  memcpy(msg, payload, length);
+  msg[length] = '\0';
+
+  Serial.print("[MQTT] Received command on topic [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(msg);
+
+  if (String(topic).endsWith("/cmd/ota")) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, msg);
+    const char* resource = "ota/firmware.bin";
+    const char* host = UPLOAD_HOST;
+    int port = UPLOAD_PORT;
+
+    if (!err) {
+      if (doc.containsKey("resource")) resource = doc["resource"];
+      if (doc.containsKey("host")) host = doc["host"];
+      if (doc.containsKey("port")) port = doc["port"];
+    }
+
+    trigger_ota_update(host, port, resource);
+  }
+}
+
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection as ");
@@ -253,6 +312,12 @@ void reconnect() {
     Serial.print(")... ");
     if (client.connect(MACHINE_ID, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("connected!");
+      String otaTopic = "factory/" + String(MACHINE_ID) + "/cmd/ota";
+      client.subscribe(otaTopic.c_str());
+      client.subscribe("factory/all/cmd/ota");
+      Serial.print("[MQTT] Subscribed to OTA command topics: ");
+      Serial.print(otaTopic);
+      Serial.println(" and factory/all/cmd/ota");
       break;
     } else {
       Serial.print("failed, rc=");
@@ -275,6 +340,7 @@ void setup() {
   Serial.println("FS initialized.");
 
   client.setServer(MQTT_HOST, MQTT_PORT);
+  client.setCallback(mqtt_callback);
   
   Serial.println("Initializing Mic...");
   init_onboard_mic();
@@ -308,36 +374,179 @@ void setup() {
   }
 
   Serial.println("Audio detector initialized.");
+
+  // Send initial boot beacon over Wi-Fi, then sleep
+  if (ensure_network_connected()) {
+    JsonDocument tdoc;
+    tdoc["machine_id"] = MACHINE_ID;
+    tdoc["machine_state"] = "IDLE";
+    tdoc["running_baseline"] = 0.0f;
+    tdoc["peak_amplitude"] = 0;
+    tdoc["uptime_seconds"] = 0;
+    char tbuf[256];
+    serializeJson(tdoc, tbuf);
+    String telemetryTopic = "factory/" + String(MACHINE_ID) + "/telemetry";
+    client.publish(telemetryTopic.c_str(), tbuf);
+  }
+  disconnect_wifi_and_sleep();
+}
+
+// --- 5-MINUTE STORE-AND-FORWARD TELEMETRY BUFFER ---
+struct TelemetrySnapshot {
+  char state[8];
+  float baseline;
+  int peak;
+  int uptime;
+};
+
+#define BATCH_BUFFER_MAX 10
+TelemetrySnapshot telemetry_batch[BATCH_BUFFER_MAX];
+int telemetry_batch_count = 0;
+unsigned long last_batch_flush_ms = 0;
+const unsigned long BATCH_FLUSH_INTERVAL_MS = 300000; // 5 minutes (300s)
+
+bool ensure_network_connected() {
+  if (WiFi.status() == WL_CONNECTED && client.connected()) {
+    return true;
+  }
+
+  Serial.println("[POWER] Waking Wi-Fi radio & connecting to network...");
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 5) {
+    attempts++;
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 4000) {
+      delay(100);
+    }
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[POWER] Wi-Fi connection FAILED");
+    return false;
+  }
+
+  Serial.print("[POWER] Wi-Fi connected! IP: ");
+  Serial.println(WiFi.localIP());
+
+  // Connect to MQTT Broker
+  attempts = 0;
+  while (!client.connected() && attempts < 3) {
+    attempts++;
+    if (client.connect(MACHINE_ID, MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("[POWER] MQTT Connected!");
+      String otaTopic = "factory/" + String(MACHINE_ID) + "/cmd/ota";
+      client.subscribe(otaTopic.c_str());
+      client.subscribe("factory/all/cmd/ota");
+      break;
+    }
+    delay(500);
+  }
+
+  return client.connected();
+}
+
+void disconnect_wifi_and_sleep() {
+  Serial.println("[POWER] Disconnecting and powering down Wi-Fi radio (30-min sleep)...");
+  if (client.connected()) {
+    client.disconnect();
+  }
+  WiFi.disconnect();
+}
+
+void flush_telemetry_batch_and_sleep() {
+  if (telemetry_batch_count == 0) return;
+
+  if (ensure_network_connected()) {
+    Serial.print("[POWER] Flushing ");
+    Serial.print(telemetry_batch_count);
+    Serial.println(" batched telemetry snapshots over MQTT...");
+
+    JsonDocument bdoc;
+    bdoc["machine_id"] = MACHINE_ID;
+    bdoc["batch_count"] = telemetry_batch_count;
+    JsonArray arr = bdoc["samples"].to<JsonArray>();
+
+    for (int i = 0; i < telemetry_batch_count; i++) {
+      JsonObject obj = arr.add<JsonObject>();
+      obj["s"] = telemetry_batch[i].state;
+      obj["b"] = round(telemetry_batch[i].baseline * 10.0f) / 10.0f;
+      obj["p"] = telemetry_batch[i].peak;
+      obj["u"] = telemetry_batch[i].uptime;
+    }
+
+    String topic = "factory/" + String(MACHINE_ID) + "/telemetry/batch";
+    String jsonStr;
+    serializeJson(bdoc, jsonStr);
+
+    if (client.publish(topic.c_str(), jsonStr.c_str())) {
+      Serial.println("[POWER] Batch publish SUCCESS!");
+      telemetry_batch_count = 0;
+      last_batch_flush_ms = millis();
+    } else {
+      Serial.println("[POWER] Batch publish FAILED, retaining buffer");
+    }
+
+    // Process any pending incoming MQTT commands (e.g. OTA update triggers)
+    for (int i = 0; i < 5; i++) {
+      client.loop();
+      delay(50);
+    }
+  }
+
+  disconnect_wifi_and_sleep();
+}
+
+void record_telemetry_snapshot(const char* state_str, float baseline, int peak, int uptime_sec) {
+  if (telemetry_batch_count < BATCH_BUFFER_MAX) {
+    strncpy(telemetry_batch[telemetry_batch_count].state, state_str, sizeof(telemetry_batch[0].state) - 1);
+    telemetry_batch[telemetry_batch_count].state[sizeof(telemetry_batch[0].state) - 1] = '\0';
+    telemetry_batch[telemetry_batch_count].baseline = baseline;
+    telemetry_batch[telemetry_batch_count].peak = peak;
+    telemetry_batch[telemetry_batch_count].uptime = uptime_sec;
+    telemetry_batch_count++;
+  } else {
+    // Shift buffer if max reached before flush
+    for (int i = 1; i < BATCH_BUFFER_MAX; i++) {
+      telemetry_batch[i - 1] = telemetry_batch[i];
+    }
+    strncpy(telemetry_batch[BATCH_BUFFER_MAX - 1].state, state_str, sizeof(telemetry_batch[0].state) - 1);
+    telemetry_batch[BATCH_BUFFER_MAX - 1].state[sizeof(telemetry_batch[0].state) - 1] = '\0';
+    telemetry_batch[BATCH_BUFFER_MAX - 1].baseline = baseline;
+    telemetry_batch[BATCH_BUFFER_MAX - 1].peak = peak;
+    telemetry_batch[BATCH_BUFFER_MAX - 1].uptime = uptime_sec;
+  }
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
+  if (client.connected()) {
+    client.loop();
   }
-  client.loop();
 
   int current_val = latest_audio_val;
 
   static unsigned long last_print_ms = 0;
-  if (millis() - last_print_ms > 500) {
+  if (millis() - last_print_ms > 1000) {
     Serial.print("Audio level: ");
     Serial.print(current_val);
-    Serial.print(" (Threshold: ");
-    Serial.print(RMS_THRESHOLD);
-    Serial.print(") | Anomaly state: ");
-    Serial.println(is_anomalous ? "ACTIVE" : "IDLE");
+    Serial.print(" | Buffered snapshots: ");
+    Serial.print(telemetry_batch_count);
+    Serial.print("/60 | Wi-Fi: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "ON" : "SLEEP");
     last_print_ms = millis();
   }
 
   static float running_baseline = 0.0f;
   static float ambient_noise_floor = 0.0f;
-  static unsigned long last_delta_trigger_ms = 0;
-  static unsigned long last_telemetry_heartbeat_ms = 0;
+  static bool machine_is_running = false;
+  static unsigned long state_change_candidate_ms = 0;
+  static unsigned long last_anomaly_recording_ms = 0;
+  static unsigned long last_snapshot_record_ms = 0;
 
   // 1. Fast EMA for Live Volume Tracking
   if (running_baseline == 0.0f) {
     running_baseline = (float)current_val;
-    ambient_noise_floor = (float)current_val;
+    ambient_noise_floor = min(380.0f, (float)current_val);
   } else {
     running_baseline = 0.90f * running_baseline + 0.10f * (float)current_val;
   }
@@ -346,100 +555,138 @@ void loop() {
   if ((float)current_val < ambient_noise_floor) {
     ambient_noise_floor = 0.85f * ambient_noise_floor + 0.15f * (float)current_val;
   } else {
-    ambient_noise_floor = 0.9995f * ambient_noise_floor + 0.0005f * (float)current_val;
+    ambient_noise_floor = min(450.0f, 0.9995f * ambient_noise_floor + 0.0005f * (float)current_val);
   }
 
-  // 3. Dynamic Environment-Agnostic Thresholds
-  float running_delta = max(150.0f, ambient_noise_floor * 0.40f);
-  float dynamic_trigger_threshold = max(500.0f, ambient_noise_floor + max(250.0f, ambient_noise_floor * 0.60f));
-  bool is_machine_running = is_anomalous || (running_baseline > (ambient_noise_floor + running_delta));
+  // 3. Operational State Determination with Hysteresis
+  float on_threshold = ambient_noise_floor + max(200.0f, ambient_noise_floor * 0.40f);
+  float off_threshold = ambient_noise_floor + max(100.0f, ambient_noise_floor * 0.20f);
 
-  // Periodic Telemetry Heartbeat (every 30 seconds)
-  if (millis() - last_telemetry_heartbeat_ms > 30000) {
-    last_telemetry_heartbeat_ms = millis();
+  if (!machine_is_running) {
+    // Currently IDLE: Check if machine is turning ON
+    if (running_baseline > on_threshold) {
+      if (state_change_candidate_ms == 0) {
+        state_change_candidate_ms = millis();
+      } else if (millis() - state_change_candidate_ms > 300) { // Sustained for 300ms
+        machine_is_running = true;
+        state_change_candidate_ms = 0;
+        Serial.println(">>> [STATE] Machine STARTUP Detected -> RUNNING <<<");
 
-    JsonDocument tdoc;
-    tdoc["machine_id"] = MACHINE_ID;
-    tdoc["machine_state"] = is_machine_running ? "RUNNING" : "IDLE";
-    tdoc["running_baseline"] = round(running_baseline * 10.0f) / 10.0f;
-    tdoc["peak_amplitude"] = current_val;
-    tdoc["uptime_seconds"] = (int)(millis() / 1000);
-
-    char tbuf[256];
-    serializeJson(tdoc, tbuf);
-
-    String telemetryTopic = "factory/" + String(MACHINE_ID) + "/telemetry";
-    client.publish(telemetryTopic.c_str(), tbuf);
-    Serial.print("[HEARTBEAT] Published telemetry: ");
-    Serial.println(tbuf);
-  }
-
-  if (current_val > dynamic_trigger_threshold) {
-    if (latest_is_voice && !is_anomalous) {
-      // Human voice detected - suppress anomaly trigger
-      static unsigned long last_voice_log_ms = 0;
-      if (millis() - last_voice_log_ms > 1500) {
-        Serial.println("[DSP] Human speech detected -> Anomaly suppressed");
-        last_voice_log_ms = millis();
-      }
-    } else {
-      last_loud_ms = millis();
-      if (current_val > peak_val)
-        peak_val = current_val;
-
-      if (!is_anomalous) {
-        // Machine startup / AC compressor inrush / discrete anomaly
-        is_anomalous = true;
-        anomaly_start_ms = millis();
-        Serial.println(">>> ANOMALY / MACHINE INRUSH DETECTED! <<<");
-        if (mp4.getRecordingState() != 1) {
-           mp4.begin();
-           Serial.println("Recording audio started (5s)...");
-        }
-      } else {
-        // In-Run Delta Detection: Sudden spike (+600 or 1.6x baseline) above steady running sound
-        if ((current_val > running_baseline + 600.0f || current_val > running_baseline * 1.6f) && 
-            (millis() - last_delta_trigger_ms > 12000)) {
+        // Trigger Instant Anomaly Audio Recording & Immediate Wakeup (5.0s)
+        if (millis() - last_anomaly_recording_ms > 15000) {
+          last_anomaly_recording_ms = millis();
           if (mp4.getRecordingState() != 1) {
             mp4.begin();
-            last_delta_trigger_ms = millis();
-            Serial.print(">>> IN-RUN SOUND DELTA! Level: ");
-            Serial.print(current_val);
-            Serial.print(" vs Running Baseline: ");
-            Serial.println(running_baseline);
+            Serial.println("Recording startup audio (5s)...");
+          }
+
+          // Immediate Wakeup & Publish Startup Alert
+          if (ensure_network_connected()) {
+            JsonDocument doc;
+            doc["machine_id"] = MACHINE_ID;
+            doc["duration_seconds"] = 5.0f;
+            doc["peak_amplitude"] = current_val;
+            char buffer[256];
+            serializeJson(doc, buffer);
+            client.publish(MQTT_TOPIC, buffer);
+          }
+        }
+      }
+    } else {
+      state_change_candidate_ms = 0;
+    }
+  } else {
+    // Currently RUNNING: Check if machine turned OFF
+    if (running_baseline < off_threshold) {
+      if (state_change_candidate_ms == 0) {
+        state_change_candidate_ms = millis();
+      } else if (millis() - state_change_candidate_ms > 3000) { // Must stay low for 3s
+        machine_is_running = false;
+        state_change_candidate_ms = 0;
+        Serial.println(">>> [STATE] Machine SHUTDOWN / SPIN-DOWN Detected -> IDLE <<<");
+
+        // Trigger Instant Shutdown / Spin-down Audio Recording (5.0s)
+        if (millis() - last_anomaly_recording_ms > 10000) {
+          last_anomaly_recording_ms = millis();
+          if (mp4.getRecordingState() != 1) {
+            mp4.begin();
+            Serial.println("Recording shutdown / spin-down audio (5s)...");
+          }
+
+          // Immediate Wakeup & Publish Shutdown Alert
+          if (ensure_network_connected()) {
+            JsonDocument doc;
+            doc["machine_id"] = MACHINE_ID;
+            doc["duration_seconds"] = 5.0f;
+            doc["peak_amplitude"] = current_val;
+            char buffer[256];
+            serializeJson(doc, buffer);
+            client.publish(MQTT_TOPIC, buffer);
+          }
+        }
+      }
+    } else {
+      state_change_candidate_ms = 0;
+
+      // In-Run Abnormal Spike Detection: Sudden surge above steady running baseline
+      if ((current_val > running_baseline + 800.0f || current_val > running_baseline * 1.8f) &&
+          (millis() - last_anomaly_recording_ms > 20000)) {
+        if (!latest_is_voice) {
+          last_anomaly_recording_ms = millis();
+          Serial.print(">>> [ANOMALY] In-Run Sound Spike! Level: ");
+          Serial.print(current_val);
+          Serial.print(" vs Baseline: ");
+          Serial.println(running_baseline);
+
+          if (mp4.getRecordingState() != 1) {
+            mp4.begin();
+          }
+
+          // Immediate Wakeup & Publish Anomaly Alert
+          if (ensure_network_connected()) {
+            JsonDocument doc;
+            doc["machine_id"] = MACHINE_ID;
+            doc["duration_seconds"] = 5.0f;
+            doc["peak_amplitude"] = current_val;
+            char buffer[256];
+            serializeJson(doc, buffer);
+            client.publish(MQTT_TOPIC, buffer);
           }
         }
       }
     }
   }
 
-  if (is_anomalous && (millis() - last_loud_ms > COOLDOWN_MS)) {
-    float duration = (float)(last_loud_ms - anomaly_start_ms) / 1000.0f;
-    if (duration < 0.1f) duration = 0.1f;
-    is_anomalous = false;
-
-    JsonDocument doc;
-    doc["machine_id"] = MACHINE_ID;
-    doc["duration_seconds"] = round(duration * 10.0f) / 10.0f;
-    doc["peak_amplitude"] = peak_val;
-
-    char buffer[256];
-    serializeJson(doc, buffer);
-    Serial.print("Publishing anomaly event: ");
-    Serial.println(buffer);
-    if (client.publish(MQTT_TOPIC, buffer)) {
-      Serial.println("MQTT Publish SUCCESS");
-    } else {
-      Serial.println("MQTT Publish FAILED");
-    }
-
-    peak_val = 0;
+  // 4. Record Internal Telemetry Snapshot to RAM every 30 seconds
+  if (millis() - last_snapshot_record_ms > 30000) {
+    last_snapshot_record_ms = millis();
+    record_telemetry_snapshot(
+      machine_is_running ? "RUNNING" : "IDLE",
+      running_baseline,
+      current_val,
+      (int)(millis() / 1000)
+    );
+    Serial.print("[BUFFER] Logged 30s snapshot to RAM: State=");
+    Serial.print(machine_is_running ? "RUNNING" : "IDLE");
+    Serial.print(" | Baseline=");
+    Serial.print(running_baseline);
+    Serial.print(" | Total Snapshots=");
+    Serial.println(telemetry_batch_count);
   }
 
+  // 5. Scheduled 5-Minute Telemetry Batch Flush
+  if (millis() - last_batch_flush_ms > BATCH_FLUSH_INTERVAL_MS || telemetry_batch_count >= BATCH_BUFFER_MAX) {
+    flush_telemetry_batch_and_sleep();
+  }
+
+  // 6. Handle Completed MP4 Uploads and Return to Sleep
   recordingstate = (int)(mp4.getRecordingState());
   if (recordingstate == 0 && previousRecordingState == 1) {
-      Serial.println("Recording finished, uploading...");
+      Serial.println("Recording finished, ensuring network and uploading MP4...");
+      ensure_network_connected();
       encodeMP4andsendHttpPostRequest();
+      // Flush any snapshots queued up to this anomaly and sleep
+      flush_telemetry_batch_and_sleep();
   }
   previousRecordingState = recordingstate;
 

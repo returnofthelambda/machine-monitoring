@@ -240,6 +240,45 @@ with st.sidebar:
             st.rerun()
 
         st.markdown("---")
+        
+        # ------------------ OVER-THE-AIR (OTA) FIRMWARE MANAGER ------------------
+        with st.expander("📡 Over-The-Air (OTA) Updates", expanded=False):
+            st.markdown("##### Remotely push new firmware over Wi-Fi:")
+            ota_dir = os.path.join(BASE_DIR, "static", "ota")
+            ota_file = os.path.join(ota_dir, "firmware.bin")
+
+            if os.path.exists(ota_file):
+                ota_stat = os.stat(ota_file)
+                st.success(f"**Staged:** `firmware.bin` ({ota_stat.st_size / (1024*1024):.2f} MB)")
+                st.caption(f"Compiled/Staged: {datetime.datetime.fromtimestamp(ota_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                st.warning("⚠️ No `firmware.bin` staged yet.\nRun `./build.sh --deploy-ota`.")
+
+            target_ota = st.session_state["selected_device"]
+            btn_ota_label = f"🚀 Push OTA to `{target_ota}`" if target_ota != "All Devices" else "🚀 Push OTA to Fleet"
+
+            if st.button(btn_ota_label, key="btn_sb_push_ota", disabled=not os.path.exists(ota_file), type="primary"):
+                import paho.mqtt.client as mqtt
+                import json
+                try:
+                    mqtt_broker_host = os.getenv("MQTT_HOST", "172.16.40.129")
+                    mqtt_broker_port = int(os.getenv("MQTT_PORT", "1883"))
+                    mqttc = mqtt.Client()
+                    mqttc.connect(mqtt_broker_host, mqtt_broker_port, 5)
+                    ota_payload = json.dumps({
+                        "cmd": "update",
+                        "resource": "ota/firmware.bin",
+                        "port": 5000
+                    })
+                    topic = f"factory/{target_ota}/cmd/ota" if target_ota != "All Devices" else "factory/all/cmd/ota"
+                    mqttc.publish(topic, ota_payload)
+                    mqttc.disconnect()
+                    st.toast(f"OTA signal published to {topic}!")
+                    st.info(f"📡 Sent OTA update signal to `{topic}`. Target device is downloading `firmware.bin` and flashing slot B (~10s)...")
+                except Exception as ex:
+                    st.error(f"Failed to send MQTT OTA command: {ex}")
+
+        st.markdown("---")
         confirm_full_purge = st.checkbox("Confirm: Wipe Entire Database & Reset All Baselines", key="confirm_full_purge")
         if st.button("💣 PURGE ALL TELEMETRY & BASELINES", type="primary", disabled=not confirm_full_purge, key="btn_full_purge"):
             conn = get_duckdb_connection()
@@ -514,8 +553,25 @@ with tab_events:
 
     st.markdown("---")
 
-    # ------------------ EVENT CARDS ------------------
-    for index, row in df.iterrows():
+    # ------------------ PAGINATION & EVENT CARDS ------------------
+    events_per_page = 15
+    total_events = len(df)
+    total_pages = max(1, (total_events + events_per_page - 1) // events_per_page)
+    
+    col_p1, col_p2 = st.columns([3, 1])
+    with col_p1:
+        st.markdown(f"Displaying **{min(total_events, events_per_page)}** of **{total_events}** recorded anomaly events:")
+    with col_p2:
+        if total_pages > 1:
+            current_page = st.selectbox("📄 Page:", options=list(range(1, total_pages + 1)), index=0, key="event_page_select")
+        else:
+            current_page = 1
+            
+    start_idx = (current_page - 1) * events_per_page
+    end_idx = start_idx + events_per_page
+    page_df = df.iloc[start_idx:end_idx]
+
+    for index, row in page_df.iterrows():
         event_id = str(row['event_id'])
         machine_id = str(row['machine_id'])
         time_det = str(row['time_detected'])
