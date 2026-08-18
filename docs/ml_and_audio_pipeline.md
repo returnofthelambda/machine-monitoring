@@ -46,3 +46,15 @@ Rather than requiring manual threshold tuning per room:
 2. Labeling `Normal Operation` computes a persistent ground-truth acoustic baseline vector for that specific machine.
 3. Clicking **"🚀 Retrain Model Now"** trains a **Scikit-Learn Random Forest Classifier** on all verified records.
 4. The system automatically re-evaluates all unverified historical detections using `model.predict_proba()`, updating predicted labels and confidence scores in DuckDB.
+
+---
+
+## 5. Physical Duration & Running State Health Profiling
+
+* **Transient Duration Envelope ($t_{\text{active}}$):**
+  * Rather than relying on static timestamps, the system parses the 25ms sliding RMS energy envelope of the decoded 16kHz audio stream.
+  * Calculates dynamic range over the 15th percentile noise floor. Frames exceeding threshold define the precise span and contiguous active duration of the acoustic event.
+* **Running State Harmonic Diagnostics:**
+  * **Dominant Tone Extraction:** Fast Fourier Transform (FFT) identifies the primary operating harmonic (e.g. 60Hz/120Hz motor poles vs 1.2kHz blade pass frequencies).
+  * **3-Band Energy Distribution:** Evaluates low-frequency unbalance (0–500Hz), aerodynamic mid-flow (500–2500Hz), and high-frequency friction/whine (2500–8000Hz).
+  * **Stability Metric ($CV$):** Analyzes the coefficient of variation ($\sigma / \mu$) over consecutive running snapshots to distinguish steady constant loads from mechanical surging or hunting.

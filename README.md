@@ -111,10 +111,13 @@ sudo systemctl enable --now anomaly-upload anomaly-ingest anomaly-dashboard
 
 ## ⚡ Key System Features
 
-* **🔋 5-Minute Store-and-Forward Wi-Fi Duty-Cycling:** Disables the Wi-Fi radio for 4m 58s out of every 5 minutes ($I_{\text{avg}} = 31.0\text{ mA}$), extending battery life by **$5.8\times$** while maintaining 30-second trend granularity.
-* **🚨 Instant Anomaly Override:** Machine start, shutdown, or loud in-run spikes immediately wake Wi-Fi, upload audio, and publish alerts in $<2\text{s}$.
-* **⚙️ Operational State Machine with Hysteresis:** Latching state machine (`IDLE` $\leftrightarrow$ `RUNNING`) eliminates runaway retrigger loops and captures both motor startup inrush and spin-down deceleration.
+* **🔋 5-Minute Store-and-Forward Wi-Fi Duty-Cycling:** Disables the Wi-Fi radio for 4m 58s out of every 5 minutes ($I_{\text{avg}} = 31.0\text{ mA}$), extending battery life by **$5.8\times$** while maintaining continuous 30-second trend granularity in DuckDB.
+* **🚨 Instant Anomaly & Leading-Edge Capture:** Startup inrush ($<20\text{ms}$ contactor snap), shutdown spin-down, or loud in-run spikes immediately wake Wi-Fi, upload audio, and publish alerts in $<2\text{s}$.
+* **⏱️ True Acoustic Duration Measurement:** Evaluates a 25ms sliding RMS energy envelope over the background noise floor to measure exact transient durations (e.g. `0.15s` contactor snap, `0.68s` startup surge, `1.60s` spin-up) rather than hardcoded edge guesses.
+* **⚡ Real-Time Running State Health & Acoustic Profiling:** Live amplitude stability index ($CV$ jitter: `🟢 Stable` vs `🔴 Surging`), dominant operating tone (e.g. `120 Hz` motor fundamental), and a 3-band spectral balance bar (🟢 Low 0–500Hz, 🔵 Mid 500–2.5kHz, 🔴 High 2.5k–8kHz).
+* **⚙️ Operational State Machine with Hysteresis:** Latching state machine (`IDLE` $\leftrightarrow$ `RUNNING`) eliminates runaway retrigger loops and tracks ongoing session run-time (e.g. `Running for 38m` / `Idle for 1h 12m`).
 * **🧠 Active Learning ML Retraining:** Label events in the dashboard, compute ground-truth baseline vectors, and train a Random Forest model with automated historical reclassification.
+* **📡 Dedicated One-Click OTA Updates:** Staged firmware binaries can be pushed wirelessly to individual machines or the entire fleet directly from the dashboard sidebar.
 * **📄 Paginated High-Performance Dashboard:** Slices event cards (15 per page) for sub-50ms render times and non-blocking `@st.fragment` background synchronization.
 
 ---
