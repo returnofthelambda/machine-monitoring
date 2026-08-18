@@ -122,10 +122,11 @@ def on_message(client, userdata, msg):
             ))
             print(f"[STREAM] Heartbeat: {payload.get('machine_id')} | State: {payload.get('machine_state')} | Baseline: {payload.get('running_baseline'):.1f}")
         else:
-            # Discrete Anomaly Event
-            dur = float(payload.get("duration_seconds", 0))
+            # Discrete Anomaly Event (Instantaneous edge trigger alarm)
+            # True acoustic duration will be measured and populated when the audio clip finishes and uploads
+            dur = float(payload["duration_seconds"]) if ("duration_seconds" in payload and payload["duration_seconds"] is not None) else None
+            time_detected = now
             time_stopped = now
-            time_detected = time_stopped - datetime.timedelta(seconds=dur)
 
             conn.execute("""
                 INSERT INTO machine_anomalies (
@@ -139,7 +140,7 @@ def on_message(client, userdata, msg):
                 dur,
                 float(payload.get("peak_amplitude", 0.0))
             ))
-            print(f"[ANOMALY] Event recorded for {payload.get('machine_id')} ({dur}s)")
+            print(f"[ANOMALY] Instant alarm triggered for {payload.get('machine_id')} (Peak: {payload.get('peak_amplitude')})")
 
         conn.close()
     except Exception as e:

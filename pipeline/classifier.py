@@ -195,14 +195,149 @@ def heuristic_predict(features):
 
     return "Ambient / Background Noise", 0.60
 
+def compute_acoustic_event_duration(audio_data, sample_rate=16000):
+    """
+    Measures the exact active duration of an acoustic transient / anomaly in seconds.
+    Analyzes the sliding window RMS energy envelope (25ms window, 10ms hop).
+    Finds the quiet baseline and calculates how long the transient energy exceeded the baseline.
+    """
+    if len(audio_data) == 0:
+        return 0.0
+
+    y = np.nan_to_num(audio_data)
+    total_duration = len(y) / float(sample_rate)
+
+    # Frame into 25ms windows with 10ms hop
+    win_len = int(sample_rate * 0.025)
+    hop_len = int(sample_rate * 0.010)
+    
+    if len(y) < win_len:
+        return round(total_duration, 2)
+
+    # Calculate short-time RMS envelope
+    num_frames = 1 + (len(y) - win_len) // hop_len
+    rms_env = np.zeros(num_frames)
+    for i in range(num_frames):
+        start = i * hop_len
+        frame = y[start:start + win_len]
+        rms_env[i] = np.sqrt(np.mean(frame**2) + 1e-12)
+
+    # Find noise floor (15th percentile) and peak energy
+    noise_floor = np.percentile(rms_env, 15)
+    peak_rms = np.max(rms_env)
+    dynamic_range = peak_rms - noise_floor
+
+    # If the sound is virtually flat/constant throughout
+    if dynamic_range < 0.15 * peak_rms or peak_rms < 1e-4:
+        return round(total_duration, 2)
+
+    # Threshold for active anomaly presence (25% above baseline toward peak)
+    threshold = noise_floor + 0.25 * dynamic_range
+    active_frames = rms_env > threshold
+
+    # Measure total active time
+    active_count = np.sum(active_frames)
+    active_duration = active_count * (hop_len / float(sample_rate))
+
+    # Also detect if this is an impulse transient / cluster of frames
+    diff = np.diff(np.concatenate(([0], active_frames.astype(int), [0])))
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    if len(starts) > 0 and len(ends) > 0:
+        event_span = (ends[-1] - starts[0]) * (hop_len / float(sample_rate))
+        if event_span <= 3.0:
+            return max(0.1, round(float(event_span), 2))
+        elif active_duration < total_duration * 0.90:
+            return max(0.1, round(float(active_duration), 2))
+
+    return round(float(total_duration), 2)
+
+def extract_spectral_health_profile(audio_data, sample_rate=16000):
+    """
+    Extracts frequency & amplitude health metrics from audio for running state diagnosis:
+    - Dominant Operating Frequency (Hz)
+    - Sub-band Energy Percentages (Low: 0-500Hz, Mid: 500-2500Hz, High: 2500-8000Hz)
+    - Harmonic Health Assessment & Texture
+    """
+    if len(audio_data) == 0:
+        return {
+            "dominant_freq_hz": 0,
+            "low_band_pct": 0.0,
+            "mid_band_pct": 0.0,
+            "high_band_pct": 0.0,
+            "spectral_centroid_hz": 0,
+            "crest_factor": 0.0,
+            "kurtosis": 0.0,
+            "health_assessment": "No Audio Data",
+            "health_color": "#9e9e9e"
+        }
+
+    y = np.nan_to_num(audio_data)
+    rms = np.sqrt(np.mean(y**2) + 1e-12)
+    peak = np.max(np.abs(y))
+    crest = float(peak / (rms + 1e-8))
+    kurt = float(np.mean((y - np.mean(y))**4) / (np.var(y)**2 + 1e-8))
+
+    n_fft = 2048
+    freqs = rfftfreq(n_fft, d=1.0/sample_rate)
+    fft_vals = np.abs(np.fft.rfft(y[:min(len(y), 16000)], n=n_fft))
+    total_energy = np.sum(fft_vals) + 1e-12
+
+    # Dominant Frequency (ignoring DC < 20Hz)
+    valid_mask = freqs >= 20
+    dom_idx = np.argmax(fft_vals * valid_mask)
+    dominant_freq = int(round(freqs[dom_idx]))
+
+    # Sub-band percentages
+    idx_500 = np.searchsorted(freqs, 500)
+    idx_2500 = np.searchsorted(freqs, 2500)
+
+    low_energy = np.sum(fft_vals[:idx_500])
+    mid_energy = np.sum(fft_vals[idx_500:idx_2500])
+    high_energy = np.sum(fft_vals[idx_2500:])
+
+    low_pct = round(float(low_energy / total_energy * 100), 1)
+    mid_pct = round(float(mid_energy / total_energy * 100), 1)
+    high_pct = round(float(high_energy / total_energy * 100), 1)
+
+    centroid = int(round(np.sum(freqs * fft_vals) / total_energy))
+
+    # Health Diagnostic Interpretation
+    if high_pct > 25.0:
+        health_assessment = "⚠️ High Friction / Bearing Whine"
+        health_color = "#f44336" # Red
+    elif low_pct > 70.0:
+        health_assessment = "⚠️ High Low-Frequency Rumble / Vibration"
+        health_color = "#ffa726" # Orange
+    elif crest > 4.0:
+        health_assessment = "⚠️ Impulsive Mechanical Knocks Detected"
+        health_color = "#ff5722"
+    else:
+        health_assessment = "🟢 Healthy Continuous Operation"
+        health_color = "#00e676" # Green
+
+    return {
+        "dominant_freq_hz": dominant_freq,
+        "low_band_pct": low_pct,
+        "mid_band_pct": mid_pct,
+        "high_band_pct": high_pct,
+        "spectral_centroid_hz": centroid,
+        "crest_factor": round(crest, 2),
+        "kurtosis": round(kurt, 2),
+        "health_assessment": health_assessment,
+        "health_color": health_color
+    }
+
 def classify_audio_file(audio_path):
     """
-    Classifies an audio file using either the trained ML model (if available)
-    or the acoustic heuristic engine.
+    Classifies an audio file, calculates true acoustic duration, and extracts spectral health profile.
+    Returns: (predicted_class, confidence, measured_duration, health_profile)
     """
     try:
         audio_data, sr = decode_audio_from_mp4(audio_path)
         feat = extract_features(audio_data, sr)
+        measured_duration = compute_acoustic_event_duration(audio_data, sr)
+        health_profile = extract_spectral_health_profile(audio_data, sr)
 
         if os.path.exists(MODEL_PATH):
             try:
@@ -210,16 +345,27 @@ def classify_audio_file(audio_path):
                 proba = pipeline.predict_proba([feat])[0]
                 classes = pipeline.classes_
                 best_idx = np.argmax(proba)
-                return str(classes[best_idx]), float(proba[best_idx])
+                return str(classes[best_idx]), float(proba[best_idx]), measured_duration, health_profile
             except Exception as e:
                 print(f"[CLASSIFIER] Model inference failed, using fallback: {e}")
 
         # Fallback to acoustic heuristics
         predicted_class, confidence = heuristic_predict(feat)
-        return str(predicted_class), float(confidence)
+        return str(predicted_class), float(confidence), measured_duration, health_profile
     except Exception as e:
         print(f"[CLASSIFIER] Feature extraction failure on {audio_path}: {e}")
-        return "Unknown", 0.0
+        default_profile = {
+            "dominant_freq_hz": 0,
+            "low_band_pct": 0.0,
+            "mid_band_pct": 0.0,
+            "high_band_pct": 0.0,
+            "spectral_centroid_hz": 0,
+            "crest_factor": 0.0,
+            "kurtosis": 0.0,
+            "health_assessment": "Unknown",
+            "health_color": "#9e9e9e"
+        }
+        return "Unknown", 0.0, 5.0, default_profile
 
 def retrain_model_from_database(db_path="machine_telemetry.duckdb"):
     """

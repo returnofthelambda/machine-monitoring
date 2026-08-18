@@ -101,9 +101,9 @@ def upload_audio():
 
         print(f"[UPLOAD] Saved {len(mp4_data)} bytes to {filepath}")
 
-        # 1. Run ML Classification
-        predicted_class, confidence = classify_audio_file(filepath)
-        print(f"[CLASSIFICATION] {filename} -> {predicted_class} ({confidence*100:.1f}%)")
+        # 1. Run ML Classification and Acoustic Analysis
+        predicted_class, confidence, measured_duration, health_profile = classify_audio_file(filepath)
+        print(f"[CLASSIFICATION] {filename} -> {predicted_class} ({confidence*100:.1f}%) | Duration: {measured_duration:.2f}s | Tone: {health_profile.get('dominant_freq_hz')}Hz")
 
         # 2. Link with DuckDB Telemetry Event
         # Check if there is an unassociated recent MQTT event for this machine within 60 seconds
@@ -119,10 +119,10 @@ def upload_audio():
             event_id = recent_event[0]
             con.execute("""
                 UPDATE machine_anomalies
-                SET audio_path = ?, predicted_class = ?, confidence = ?
+                SET audio_path = ?, predicted_class = ?, confidence = ?, duration_seconds = ?
                 WHERE event_id = ?
-            """, (relative_path, predicted_class, confidence, event_id))
-            print(f"[DATABASE] Updated event {event_id} with audio and classification.")
+            """, (relative_path, predicted_class, confidence, measured_duration, event_id))
+            print(f"[DATABASE] Updated event {event_id} with audio, duration ({measured_duration:.2f}s), and classification.")
         else:
             # Create a new standalone event entry
             event_id = str(uuid.uuid4())
@@ -134,15 +134,15 @@ def upload_audio():
             """, (
                 event_id,
                 machine_id,
-                now - datetime.timedelta(seconds=5),
+                now - datetime.timedelta(seconds=measured_duration),
                 now,
-                5.0,
+                measured_duration,
                 0.0,
                 relative_path,
                 predicted_class,
                 confidence
             ))
-            print(f"[DATABASE] Created new event {event_id} with audio and classification.")
+            print(f"[DATABASE] Created new event {event_id} with duration {measured_duration:.2f}s.")
         con.close()
 
         return jsonify({
@@ -151,11 +151,41 @@ def upload_audio():
             "filename": filename,
             "audio_url": f"/audio/{filename}",
             "predicted_class": predicted_class,
-            "confidence": round(confidence, 4)
+            "confidence": round(confidence, 4),
+            "measured_duration": measured_duration,
+            "health_profile": health_profile
         }), 200
 
     except Exception as e:
         print(f"[ERROR] Failed to process upload: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/recalculate_durations', methods=['POST'])
+def recalculate_durations():
+    """Recalculates true acoustic event durations on all historical audio files."""
+    try:
+        con = get_duckdb_connection()
+        rows = con.execute("SELECT event_id, audio_path FROM machine_anomalies WHERE audio_path IS NOT NULL").fetchall()
+        updated_count = 0
+        for event_id, audio_path in rows:
+            resolved_path = audio_path
+            if not os.path.exists(resolved_path):
+                alt = os.path.join(BASE_DIR, "..", audio_path)
+                alt2 = os.path.join(UPLOAD_DIR, os.path.basename(audio_path))
+                if os.path.exists(alt): resolved_path = alt
+                elif os.path.exists(alt2): resolved_path = alt2
+                else: continue
+
+            try:
+                _, _, dur, _ = classify_audio_file(resolved_path)
+                con.execute("UPDATE machine_anomalies SET duration_seconds = ? WHERE event_id = ?", (dur, event_id))
+                updated_count += 1
+            except Exception as e:
+                print(f"[RECALCULATE] Error on {resolved_path}: {e}")
+
+        con.close()
+        return jsonify({"status": "success", "updated_records": updated_count}), 200
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 OTA_DIR = os.path.join(BASE_DIR, "static", "ota")

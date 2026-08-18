@@ -578,7 +578,7 @@ void loop() {
         if (ensure_network_connected()) {
           JsonDocument doc;
           doc["machine_id"] = MACHINE_ID;
-          doc["duration_seconds"] = 5.0f;
+          doc["trigger_type"] = "STARTUP_TRANSIENT";
           doc["peak_amplitude"] = current_val;
           char buffer[256];
           serializeJson(doc, buffer);
@@ -621,7 +621,7 @@ void loop() {
           if (ensure_network_connected()) {
             JsonDocument doc;
             doc["machine_id"] = MACHINE_ID;
-            doc["duration_seconds"] = 5.0f;
+            doc["trigger_type"] = "SHUTDOWN_TRANSITION";
             doc["peak_amplitude"] = current_val;
             char buffer[256];
             serializeJson(doc, buffer);
@@ -650,7 +650,7 @@ void loop() {
           if (ensure_network_connected()) {
             JsonDocument doc;
             doc["machine_id"] = MACHINE_ID;
-            doc["duration_seconds"] = 5.0f;
+            doc["trigger_type"] = "IN_RUN_SPIKE";
             doc["peak_amplitude"] = current_val;
             char buffer[256];
             serializeJson(doc, buffer);
