@@ -42,7 +42,7 @@ extern "C" int wifi_config_autoreconnect(unsigned char, unsigned char, unsigned 
 #define MACHINE_ID "MACH_PUMP_01"
 #endif
 
-const int RMS_THRESHOLD = 1500;
+const int RMS_THRESHOLD = 550;
 const unsigned long COOLDOWN_MS = 1500;
 
 class CustomAudio : public Audio {
@@ -330,8 +330,29 @@ void loop() {
   }
 
   static float running_baseline = 0.0f;
+  static float ambient_noise_floor = 0.0f;
   static unsigned long last_delta_trigger_ms = 0;
   static unsigned long last_telemetry_heartbeat_ms = 0;
+
+  // 1. Fast EMA for Live Volume Tracking
+  if (running_baseline == 0.0f) {
+    running_baseline = (float)current_val;
+    ambient_noise_floor = (float)current_val;
+  } else {
+    running_baseline = 0.90f * running_baseline + 0.10f * (float)current_val;
+  }
+
+  // 2. Self-Calibrating Ambient Noise Floor (Tracks lowest steady room noise)
+  if ((float)current_val < ambient_noise_floor) {
+    ambient_noise_floor = 0.85f * ambient_noise_floor + 0.15f * (float)current_val;
+  } else {
+    ambient_noise_floor = 0.9995f * ambient_noise_floor + 0.0005f * (float)current_val;
+  }
+
+  // 3. Dynamic Environment-Agnostic Thresholds
+  float running_delta = max(150.0f, ambient_noise_floor * 0.40f);
+  float dynamic_trigger_threshold = max(500.0f, ambient_noise_floor + max(250.0f, ambient_noise_floor * 0.60f));
+  bool is_machine_running = is_anomalous || (running_baseline > (ambient_noise_floor + running_delta));
 
   // Periodic Telemetry Heartbeat (every 30 seconds)
   if (millis() - last_telemetry_heartbeat_ms > 30000) {
@@ -339,8 +360,8 @@ void loop() {
 
     JsonDocument tdoc;
     tdoc["machine_id"] = MACHINE_ID;
-    tdoc["machine_state"] = is_anomalous ? "RUNNING" : "IDLE";
-    tdoc["running_baseline"] = running_baseline;
+    tdoc["machine_state"] = is_machine_running ? "RUNNING" : "IDLE";
+    tdoc["running_baseline"] = round(running_baseline * 10.0f) / 10.0f;
     tdoc["peak_amplitude"] = current_val;
     tdoc["uptime_seconds"] = (int)(millis() / 1000);
 
@@ -353,7 +374,7 @@ void loop() {
     Serial.println(tbuf);
   }
 
-  if (current_val > RMS_THRESHOLD) {
+  if (current_val > dynamic_trigger_threshold) {
     if (latest_is_voice && !is_anomalous) {
       // Human voice detected - suppress anomaly trigger
       static unsigned long last_voice_log_ms = 0;
@@ -367,21 +388,17 @@ void loop() {
         peak_val = current_val;
 
       if (!is_anomalous) {
-        // Machine startup or new discrete anomaly
+        // Machine startup / AC compressor inrush / discrete anomaly
         is_anomalous = true;
         anomaly_start_ms = millis();
-        running_baseline = (float)current_val;
-        Serial.println(">>> ANOMALY / MACHINE STARTUP DETECTED! <<<");
+        Serial.println(">>> ANOMALY / MACHINE INRUSH DETECTED! <<<");
         if (mp4.getRecordingState() != 1) {
            mp4.begin();
            Serial.println("Recording audio started (5s)...");
         }
       } else {
-        // Machine is already running: Smoothly track baseline hum
-        running_baseline = 0.98f * running_baseline + 0.02f * (float)current_val;
-
-        // In-Run Delta Detection: Sudden spike (+1200 or 1.8x baseline) above steady running sound
-        if ((current_val > running_baseline + 1200.0f || current_val > running_baseline * 1.8f) && 
+        // In-Run Delta Detection: Sudden spike (+600 or 1.6x baseline) above steady running sound
+        if ((current_val > running_baseline + 600.0f || current_val > running_baseline * 1.6f) && 
             (millis() - last_delta_trigger_ms > 12000)) {
           if (mp4.getRecordingState() != 1) {
             mp4.begin();
@@ -417,7 +434,6 @@ void loop() {
     }
 
     peak_val = 0;
-    running_baseline = 0.0f;
   }
 
   recordingstate = (int)(mp4.getRecordingState());

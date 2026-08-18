@@ -11,7 +11,7 @@ An end-to-end industrial IoT monitoring system powered by the **Realtek AmebaPro
 │                   AMB82-MINI Edge Sensor Nodes                         │
 │                                                                        │
 │   • 16kHz Continuous Acoustic Monitoring (ARM Cortex-M33 DSP)          │
-│   • Dynamic 30s Telemetry Heartbeats (EMA Baseline Tracking)           │
+│   • Dynamic Self-Calibrating Noise Floor (Dual-Tier EMA Engine)        │
 │   • Real-Time On-Device Voice / Speech Harmonic Filter                 │
 │   • Event-Driven 5.0s AAC/MP4 Hardware Audio Capture                   │
 └───────────────────┬────────────────────────────────┬───────────────────┘
@@ -34,8 +34,9 @@ An end-to-end industrial IoT monitoring system powered by the **Realtek AmebaPro
                                     │                                    │
                                     │ • Fleet & Machine State Overview   │
                                     │ • Audio Player & Spectrogram Heatmap│
+                                    │ • Time-Window & Amplitude Filters  │
                                     │ • Human-in-the-Loop Active Retrain │
-                                    │ • Bulk Management & Mass Deletion  │
+                                    │ • Scope-Aware Database Wipe Manager│
                                     └────────────────────────────────────┘
 ```
 
@@ -129,10 +130,20 @@ sudo systemctl enable --now anomaly-upload anomaly-ingest anomaly-dashboard
 
 1. **Acoustic Physics Bootstrap:** On cold-start, the system calculates time-domain metrics (RMS, Peak, Crest Factor, Kurtosis) and spectral metrics (Centroid, Rolloff, Flatness, Sub-band energies) to estimate anomaly types.
 2. **On-Device DSP Voice Filter:** Runs real-time harmonic pitch autocorrelation ($80\text{ Hz} - 300\text{ Hz}$) on the Cortex-M33 to suppress human conversation at the edge before recording or alarming.
-3. **Continuous Duty & Wear Tracking:** A dynamic Exponential Moving Average (EMA) baseline runs constantly on the MCU. Every 30 seconds, a lightweight JSON heartbeat is sent over MQTT containing the `running_baseline`, `peak_amplitude`, and the machine's ON/OFF state to track acoustic wear trends and calculate duty cycle percentages.
-4. **Active Retraining:**
-   - Label events in the dashboard (`Mechanical Knock`, `Bearing Wear`, `Cavitation`, `Normal Operation`, etc.).
-   - Marking an event as `Normal Operation` instantly calculates and saves a persistent acoustic profile for that specific machine.
+3. **Environment-Agnostic Self-Calibrating Noise Engine:**
+   - **`ambient_noise_floor`**: Uses a slow minimum-filter to continuously track the lowest steady background noise floor of the specific room (e.g., $120$ for a quiet closet, $350$ for a basement with a dehumidifier, or $1200$ for a factory pump floor).
+   - **`running_baseline`**: Uses a fast Exponential Moving Average (EMA) to track real-time volume.
+   - **Relative Thresholding**: `RUNNING` vs `IDLE` state and anomaly triggers automatically calculate relative to *that specific board's local noise floor*, requiring zero manual threshold tuning per device.
+4. **Machine Startup & Spin-Down Classification:** Dedicated `Machine Start / Stop` class with automated Spectral Flux heuristics for identifying dynamic acoustic transitions during motor inrush and spin-down.
+5. **Time-Window Filtering & Database Wipe Manager:**
+   - Filter telemetry trends and events by time range (`Last 1 Hour` to `Last 7 Days`) and minimum amplitude threshold.
+   - Scope-aware database manager to wipe continuous stream logs, delete `.mp4` audio archives, or execute a full factory database purge (`DELETE FROM machine_telemetry_stream, machine_anomalies, machine_baselines`).
+6. **Non-Blocking Data Synchronization:**
+   - **On-Demand Manual Sync:** Instant `⚡ Sync / Refresh Data Now` button to pull fresh telemetry without periodic screen interrupts.
+   - **Streamlit `@st.fragment` Auto-Sync:** Optional background fragment execution that silently updates the trend charts every 5 seconds without rerunning the main page, freezing inputs, or interrupting audio playback.
+7. **Active Retraining:**
+   - Label events in the dashboard (`Mechanical Knock`, `Bearing Wear`, `Machine Start / Stop`, `Normal Operation`, etc.).
+   - Marking an event as `Normal Operation` instantly calculates and saves a persistent ground-truth acoustic baseline vector for that specific machine.
    - Click **"🚀 Retrain Model Now"** in the sidebar.
    - A **Scikit-Learn Random Forest Classifier** is trained, and **all unverified historical detections are automatically reclassified** with exact ensemble tree probabilities (`model.predict_proba()`).
 

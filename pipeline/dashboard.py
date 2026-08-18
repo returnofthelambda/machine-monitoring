@@ -125,11 +125,54 @@ with st.sidebar:
         st.session_state["selected_device"] = selected_from_sb
         st.rerun()
 
-    # Active dataset based on selection
+    st.markdown("---")
+    st.subheader("🔄 Data Synchronization")
+    if st.button("⚡ Sync / Refresh Data Now", key="btn_manual_sync", use_container_width=True, type="secondary"):
+        st.rerun()
+
+    enable_fragment_sync = st.checkbox("Enable Background Auto-Sync (Non-Blocking)", value=False, key="cb_fragment_sync", help="Uses Streamlit fragments to update charts silently in the background without freezing your inputs or audio playback.")
+
+    st.markdown("---")
+    st.subheader("🔍 Telemetry Filtering Controls")
+    time_filter = st.selectbox(
+        "⏱️ Time Window Filter:",
+        options=["All Time", "Last 1 Hour", "Last 6 Hours", "Last 24 Hours", "Last 7 Days"],
+        index=0,
+        key="sidebar_time_filter"
+    )
+    
+    min_amp_filter = st.slider(
+        "🔊 Min Amplitude Threshold:",
+        min_value=0,
+        max_value=3000,
+        value=0,
+        step=50,
+        key="sidebar_min_amp_filter"
+    )
+
+    # Apply Sidebar Filters to Raw Data
+    now_dt = datetime.datetime.now()
+    if time_filter != "All Time":
+        hours_map = {"Last 1 Hour": 1, "Last 6 Hours": 6, "Last 24 Hours": 24, "Last 7 Days": 168}
+        cutoff = now_dt - datetime.timedelta(hours=hours_map[time_filter])
+        if not raw_df.empty and 'time_detected' in raw_df.columns:
+            raw_df = raw_df[pd.to_datetime(raw_df['time_detected']).dt.tz_localize(None) >= cutoff]
+        if not raw_stream_df.empty and 'recorded_at' in raw_stream_df.columns:
+            raw_stream_df = raw_stream_df[pd.to_datetime(raw_stream_df['recorded_at']).dt.tz_localize(None) >= cutoff]
+
+    if min_amp_filter > 0:
+        if not raw_df.empty and 'peak_amplitude' in raw_df.columns:
+            raw_df = raw_df[raw_df['peak_amplitude'] >= min_amp_filter]
+        if not raw_stream_df.empty and 'peak_amplitude' in raw_stream_df.columns:
+            raw_stream_df = raw_stream_df[raw_stream_df['peak_amplitude'] >= min_amp_filter]
+
+    # Active dataset based on selection (honoring time window & amplitude filters)
     if st.session_state["selected_device"] == "All Devices":
         df = raw_df.copy()
+        df_stream = raw_stream_df.copy()
     else:
         df = raw_df[raw_df['machine_id'] == st.session_state["selected_device"]].reset_index(drop=True) if not raw_df.empty else pd.DataFrame()
+        df_stream = raw_stream_df[raw_stream_df['machine_id'] == st.session_state["selected_device"]].reset_index(drop=True) if not raw_stream_df.empty else pd.DataFrame()
 
     total_events = len(df)
     labeled_count = 0
@@ -160,6 +203,60 @@ with st.sidebar:
                 st.warning(result["message"])
             else:
                 st.error(result["message"])
+
+    st.markdown("---")
+    with st.expander("🗑️ Database & Data Wipe Manager", expanded=False):
+        target_dev = st.session_state["selected_device"]
+        dev_label = f"Device `{target_dev}`" if target_dev != "All Devices" else "ALL Fleet Devices"
+        
+        st.markdown(f"**Target Scope:** {dev_label}")
+        
+        if st.button("🧹 Wipe 30s Stream Telemetry", key="btn_wipe_stream_sb", help=f"Clears continuous telemetry stream rows for {dev_label}"):
+            conn = get_duckdb_connection()
+            if target_dev == "All Devices":
+                conn.execute("DELETE FROM machine_telemetry_stream")
+            else:
+                conn.execute("DELETE FROM machine_telemetry_stream WHERE machine_id = ?", (target_dev,))
+            conn.close()
+            st.toast(f"Wiped telemetry stream for {dev_label}.")
+            st.rerun()
+
+        if st.button("🗑️ Wipe Anomaly Detections & Audio", key="btn_wipe_anomalies_sb", help=f"Clears discrete anomaly records and deletes audio files for {dev_label}"):
+            conn = get_duckdb_connection()
+            if target_dev == "All Devices":
+                rows = conn.execute("SELECT audio_path FROM machine_anomalies").fetchall()
+                conn.execute("DELETE FROM machine_anomalies")
+            else:
+                rows = conn.execute("SELECT audio_path FROM machine_anomalies WHERE machine_id = ?", (target_dev,)).fetchall()
+                conn.execute("DELETE FROM machine_anomalies WHERE machine_id = ?", (target_dev,))
+            for (ap,) in rows:
+                if ap:
+                    p = os.path.join(BASE_DIR, ap) if not os.path.isabs(ap) else ap
+                    if os.path.exists(p):
+                        try: os.remove(p)
+                        except Exception: pass
+            conn.close()
+            st.toast(f"Wiped anomaly records and audio for {dev_label}.")
+            st.rerun()
+
+        st.markdown("---")
+        confirm_full_purge = st.checkbox("Confirm: Wipe Entire Database & Reset All Baselines", key="confirm_full_purge")
+        if st.button("💣 PURGE ALL TELEMETRY & BASELINES", type="primary", disabled=not confirm_full_purge, key="btn_full_purge"):
+            conn = get_duckdb_connection()
+            rows = conn.execute("SELECT audio_path FROM machine_anomalies").fetchall()
+            for (ap,) in rows:
+                if ap:
+                    p = os.path.join(BASE_DIR, ap) if not os.path.isabs(ap) else ap
+                    if os.path.exists(p):
+                        try: os.remove(p)
+                        except Exception: pass
+            conn.execute("DELETE FROM machine_anomalies")
+            conn.execute("DELETE FROM machine_telemetry_stream")
+            try: conn.execute("DELETE FROM machine_baselines")
+            except Exception: pass
+            conn.close()
+            st.toast("Entire DuckDB telemetry database and audio archive wiped.")
+            st.rerun()
 
 # --------------------------------------------------------------------------------------
 # HEADER & DYNAMIC CONTEXT METRICS
@@ -602,44 +699,55 @@ with tab_visuals:
     st.markdown("#### 📈 Continuous Acoustic Baseline Stream (Acoustic Drift & Wear Tracking)")
     st.caption("Tracks running volume drift over hours and weeks. A gradual upward slope indicates mechanical wear / bearing degradation.")
 
-    df_stream = load_stream_telemetry(st.session_state['selected_device'])
-    if not df_stream.empty:
-        fig_stream = go.Figure()
-        fig_stream.add_trace(go.Scatter(
-            x=df_stream['recorded_at'],
-            y=df_stream['running_baseline'],
-            mode='lines+markers',
-            line=dict(color='#00e5ff', width=2),
-            name='Running Baseline'
-        ))
-        fig_stream.add_trace(go.Scatter(
-            x=df_stream['recorded_at'],
-            y=df_stream['peak_amplitude'],
-            mode='lines',
-            line=dict(color='#ff5252', width=1, dash='dot'),
-            name='Peak Amplitude'
-        ))
-        fig_stream.update_layout(
-            title="Continuous Running Baseline & Peak Volume Drift",
-            xaxis_title="Time",
-            yaxis_title="Amplitude Level",
-            height=280,
-            template="plotly_dark",
-            margin=dict(l=20, r=20, t=35, b=20)
-        )
-        st.plotly_chart(fig_stream)
+    @st.fragment(run_every=5 if enable_fragment_sync else None)
+    def render_stream_chart():
+        d_stream = load_stream_telemetry(st.session_state['selected_device'])
+        if time_filter != "All Time":
+            hours_map = {"Last 1 Hour": 1, "Last 6 Hours": 6, "Last 24 Hours": 24, "Last 7 Days": 168}
+            cutoff = datetime.datetime.now() - datetime.timedelta(hours=hours_map[time_filter])
+            if not d_stream.empty and 'recorded_at' in d_stream.columns:
+                d_stream = d_stream[pd.to_datetime(d_stream['recorded_at']).dt.tz_localize(None) >= cutoff]
+        if min_amp_filter > 0 and not d_stream.empty and 'peak_amplitude' in d_stream.columns:
+            d_stream = d_stream[d_stream['peak_amplitude'] >= min_amp_filter]
 
-        # Duty cycle calculation
-        total_pings = len(df_stream)
-        running_pings = len(df_stream[df_stream['machine_state'] == 'RUNNING'])
-        duty_cycle = (running_pings / total_pings * 100.0) if total_pings > 0 else 0.0
-        
-        col_st1, col_st2, col_st3 = st.columns(3)
-        col_st1.metric("Current Running Baseline", f"{df_stream['running_baseline'].iloc[-1]:.1f}")
-        col_st2.metric("Calculated Duty Cycle", f"{duty_cycle:.1f}%")
-        col_st3.metric("Telemetry Heartbeats", total_pings)
-    else:
-        st.info("Continuous baseline stream data will display here as edge devices transmit their 30-second telemetry heartbeats.")
+        if not d_stream.empty:
+            fig_stream = go.Figure()
+            fig_stream.add_trace(go.Scatter(
+                x=d_stream['recorded_at'],
+                y=d_stream['running_baseline'],
+                mode='lines+markers',
+                line=dict(color='#00e5ff', width=2),
+                name='Running Baseline'
+            ))
+            fig_stream.add_trace(go.Scatter(
+                x=d_stream['recorded_at'],
+                y=d_stream['peak_amplitude'],
+                mode='lines',
+                line=dict(color='#ff5252', width=1, dash='dot'),
+                name='Peak Amplitude'
+            ))
+            fig_stream.update_layout(
+                title=f"Continuous Running Baseline ({time_filter})",
+                xaxis_title="Time",
+                yaxis_title="Amplitude Level",
+                height=280,
+                template="plotly_dark",
+                margin=dict(l=20, r=20, t=35, b=20)
+            )
+            st.plotly_chart(fig_stream, use_container_width=True)
+
+            total_pings = len(d_stream)
+            running_pings = len(d_stream[d_stream['machine_state'] == 'RUNNING'])
+            duty_cycle = (running_pings / total_pings * 100.0) if total_pings > 0 else 0.0
+            
+            col_st1, col_st2, col_st3 = st.columns(3)
+            col_st1.metric("Current Running Baseline", f"{d_stream['running_baseline'].iloc[-1]:.1f}")
+            col_st2.metric("Calculated Duty Cycle", f"{duty_cycle:.1f}%")
+            col_st3.metric("Telemetry Heartbeats", total_pings)
+        else:
+            st.info(f"No stream telemetry matching current filters ({time_filter}).")
+
+    render_stream_chart()
 
     st.markdown("---")
     st.markdown("#### ⏳ Anomaly Distributions & Timeline")
@@ -689,8 +797,45 @@ with tab_visuals:
 with tab_data:
     st.subheader(f"🗄️ Raw Telemetry Database ({st.session_state['selected_device']})")
     
+    # ------------------ INLINE DATA DELETE & WIPE CONTROLS ------------------
+    with st.expander("🗑️ Delete & Clear Telemetry Data", expanded=False):
+        target_dev = st.session_state["selected_device"]
+        dev_lbl = f"`{target_dev}`" if target_dev != "All Devices" else "ALL Fleet Devices"
+        st.markdown(f"##### Delete telemetry records for {dev_lbl}:")
+        
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            if st.button(f"🧹 Delete 30s Stream Telemetry ({dev_lbl})", key="btn_del_stream_tab"):
+                conn = get_duckdb_connection()
+                if target_dev == "All Devices":
+                    conn.execute("DELETE FROM machine_telemetry_stream")
+                else:
+                    conn.execute("DELETE FROM machine_telemetry_stream WHERE machine_id = ?", (target_dev,))
+                conn.close()
+                st.toast(f"Deleted stream telemetry for {dev_lbl}.")
+                st.rerun()
+
+        with col_w2:
+            if st.button(f"🗑️ Delete Anomaly Records & Audio ({dev_lbl})", key="btn_del_anom_tab"):
+                conn = get_duckdb_connection()
+                if target_dev == "All Devices":
+                    rows = conn.execute("SELECT audio_path FROM machine_anomalies").fetchall()
+                    conn.execute("DELETE FROM machine_anomalies")
+                else:
+                    rows = conn.execute("SELECT audio_path FROM machine_anomalies WHERE machine_id = ?", (target_dev,)).fetchall()
+                    conn.execute("DELETE FROM machine_anomalies WHERE machine_id = ?", (target_dev,))
+                for (ap,) in rows:
+                    if ap:
+                        p = os.path.join(BASE_DIR, ap) if not os.path.isabs(ap) else ap
+                        if os.path.exists(p):
+                            try: os.remove(p)
+                            except Exception: pass
+                conn.close()
+                st.toast(f"Deleted anomaly records and audio for {dev_lbl}.")
+                st.rerun()
+
+    st.markdown("---")
     st.markdown("#### 💓 Continuous 30s Telemetry Heartbeat Stream (`machine_telemetry_stream`)")
-    df_stream = load_stream_telemetry(st.session_state['selected_device'])
     if not df_stream.empty:
         st.dataframe(df_stream, use_container_width=True)
     else:

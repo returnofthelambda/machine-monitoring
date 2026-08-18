@@ -27,6 +27,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 DEFAULT_CLASSES = [
     "Normal Operation",
+    "Machine Start / Stop",
     "Bearing Wear / Friction",
     "Cavitation / Flow Turbulence",
     "Mechanical Knock / Impact",
@@ -180,7 +181,11 @@ def heuristic_predict(features):
     if norm_centroid > 0.45 and high_freq_energy > 0.40 and zcr > 0.15:
         return "Bearing Wear / Friction", float(min(0.88, 0.50 + high_freq_energy * 0.4))
 
-    # 4. Broad spectrum + high spectral flatness -> Cavitation / Flow Turbulence
+    # 4. High dynamic transition (spectral flux) -> Machine Start / Stop transient
+    if spectral_flux > 0.18 and crest_factor < 4.5:
+        return "Machine Start / Stop", float(min(0.88, 0.55 + spectral_flux * 1.5))
+
+    # 5. Broad spectrum + high spectral flatness -> Cavitation / Flow Turbulence
     if flatness > 0.25 and norm_spread > 0.30:
         return "Cavitation / Flow Turbulence", float(min(0.85, 0.50 + flatness))
 
@@ -392,7 +397,7 @@ def update_machine_baseline(machine_id, db_path="machine_telemetry.duckdb"):
                 baseline_peak = excluded.baseline_peak,
                 baseline_centroid = excluded.baseline_centroid,
                 sample_count = excluded.sample_count,
-                updated_at = CURRENT_TIMESTAMP;
+                updated_at = excluded.updated_at;
         """, (machine_id, mean_rms, mean_peak, mean_cent, count))
 
     con.close()

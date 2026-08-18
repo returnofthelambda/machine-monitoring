@@ -17,13 +17,13 @@ def get_duckdb_connection():
     import time
     for _ in range(20):
         try:
-            return get_duckdb_connection()
+            return duckdb.connect(DB_PATH)
         except duckdb.IOException as e:
             if "lock" in str(e).lower():
                 time.sleep(0.2)
             else:
                 raise
-    return get_duckdb_connection()
+    return duckdb.connect(DB_PATH)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
