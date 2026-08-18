@@ -19,7 +19,7 @@ An end-to-end industrial IoT condition monitoring platform powered by **Realtek 
                     ▼                                ▼
 ┌──────────────────────────────┐    ┌────────────────────────────────────┐
 │      MQTT Broker Node        │    │    Backend Server (Linux / VM)     │
-│      (172.16.40.129)         │    │          (172.16.40.130)           │
+│     (<MQTT_BROKER_IP>)       │    │          (<SERVER_IP>)             │
 │                              │    │                                    │
 │ • Mosquitto Broker           │───▶│ • anomaly-ingest.service (MQTT)    │
 │ • factory/+/telemetry/batch  │    │ • anomaly-upload.service (:5000)   │
@@ -48,12 +48,12 @@ Edit [.env](file:///.env) before flashing each unit:
 ```ini
 WIFI_SSID="factory_iot_wifi"
 WIFI_PASSWORD="Your_Secure_Password"
-MQTT_HOST="172.16.40.129"
+MQTT_HOST="192.168.1.50"
 MQTT_PORT=1883
 MQTT_USER="factory_worker"
 MQTT_PASSWORD="Your_Password"
 MACHINE_ID="MACH_PUMP_01"
-UPLOAD_HOST="172.16.40.130"
+UPLOAD_HOST="192.168.1.100"
 UPLOAD_PORT=5000
 BOARD_FQBN="realtek:AmebaPro2:Ameba_AMB82-MINI:LoadNNModelSource=sd,OTAMode=Enable"
 PORT="/dev/ttyUSB0"
@@ -77,7 +77,7 @@ After the initial USB flash, update nodes wirelessly without physical access:
    ```
 2. **Push Remotely:** Open the Streamlit dashboard sidebar under **`📡 Over-The-Air (OTA) Updates`** and click **`🚀 Push OTA Update`**, or publish over MQTT:
    ```bash
-   mosquitto_pub -h 172.16.40.129 -p 1883 -u factory_worker -P Your_Password \
+   mosquitto_pub -h <MQTT_BROKER_IP> -p 1883 -u factory_worker -P Your_Password \
      -t "factory/MACH_PUMP_01/cmd/ota" \
      -m '{"resource":"ota/firmware.bin","port":5000}'
    ```
@@ -86,7 +86,7 @@ After the initial USB flash, update nodes wirelessly without physical access:
 
 ## 🖥️ Server Deployment (Debian / Ubuntu / Proxmox)
 
-On the backend server (`172.16.40.130`):
+On the backend server (`<SERVER_IP>`):
 
 ### 1. Install Dependencies & Setup Directory
 ```bash

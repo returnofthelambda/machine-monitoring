@@ -233,7 +233,7 @@ with st.sidebar:
             import paho.mqtt.client as mqtt
             import json
             try:
-                mqtt_broker_host = os.getenv("MQTT_HOST", "172.16.40.129")
+                mqtt_broker_host = os.getenv("MQTT_HOST", "127.0.0.1")
                 mqtt_broker_port = int(os.getenv("MQTT_PORT", "1883"))
                 mqttc = mqtt.Client()
                 mqttc.connect(mqtt_broker_host, mqtt_broker_port, 5)
