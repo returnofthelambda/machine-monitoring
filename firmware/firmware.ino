@@ -563,34 +563,38 @@ void loop() {
   float off_threshold = ambient_noise_floor + max(100.0f, ambient_noise_floor * 0.20f);
 
   if (!machine_is_running) {
-    // Currently IDLE: Check if machine is turning ON
+    // Leading-Edge Instant Trigger: Catch the exact contactor snap & inrush transient (<20ms)
+    if ((current_val > on_threshold + 80.0f || current_val > ambient_noise_floor + 200.0f) && current_val > 500) {
+      if (!latest_is_voice && millis() - last_anomaly_recording_ms > 15000) {
+        last_anomaly_recording_ms = millis();
+        if (mp4.getRecordingState() != 1) {
+          mp4.begin();
+          Serial.print(">>> [TRIGGER] Instant Leading-Edge Startup Transient (Peak: ");
+          Serial.print(current_val);
+          Serial.println(")! Starting MP4 capture (5s)... <<<");
+        }
+
+        // Immediate Wakeup & Publish Startup Alert
+        if (ensure_network_connected()) {
+          JsonDocument doc;
+          doc["machine_id"] = MACHINE_ID;
+          doc["duration_seconds"] = 5.0f;
+          doc["peak_amplitude"] = current_val;
+          char buffer[256];
+          serializeJson(doc, buffer);
+          client.publish(MQTT_TOPIC, buffer);
+        }
+      }
+    }
+
+    // State Latch: Confirm sustained operation into RUNNING mode
     if (running_baseline > on_threshold) {
       if (state_change_candidate_ms == 0) {
         state_change_candidate_ms = millis();
       } else if (millis() - state_change_candidate_ms > 300) { // Sustained for 300ms
         machine_is_running = true;
         state_change_candidate_ms = 0;
-        Serial.println(">>> [STATE] Machine STARTUP Detected -> RUNNING <<<");
-
-        // Trigger Instant Anomaly Audio Recording & Immediate Wakeup (5.0s)
-        if (millis() - last_anomaly_recording_ms > 15000) {
-          last_anomaly_recording_ms = millis();
-          if (mp4.getRecordingState() != 1) {
-            mp4.begin();
-            Serial.println("Recording startup audio (5s)...");
-          }
-
-          // Immediate Wakeup & Publish Startup Alert
-          if (ensure_network_connected()) {
-            JsonDocument doc;
-            doc["machine_id"] = MACHINE_ID;
-            doc["duration_seconds"] = 5.0f;
-            doc["peak_amplitude"] = current_val;
-            char buffer[256];
-            serializeJson(doc, buffer);
-            client.publish(MQTT_TOPIC, buffer);
-          }
-        }
+        Serial.println(">>> [STATE] Machine STARTUP Confirmed -> RUNNING <<<");
       }
     } else {
       state_change_candidate_ms = 0;
