@@ -213,6 +213,44 @@ with st.sidebar:
                 st.error(result["message"])
 
     st.markdown("---")
+    # ------------------ OVER-THE-AIR (OTA) FIRMWARE MANAGER ------------------
+    with st.expander("📡 Over-The-Air (OTA) Updates", expanded=False):
+        st.markdown("##### Remotely push new firmware over Wi-Fi:")
+        ota_dir = os.path.join(BASE_DIR, "static", "ota")
+        ota_file = os.path.join(ota_dir, "firmware.bin")
+
+        if os.path.exists(ota_file):
+            ota_stat = os.stat(ota_file)
+            st.success(f"**Staged:** `firmware.bin` ({ota_stat.st_size / (1024*1024):.2f} MB)")
+            st.caption(f"Compiled/Staged: {datetime.datetime.fromtimestamp(ota_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            st.warning("⚠️ No `firmware.bin` staged yet.\nRun `./build.sh --deploy-ota`.")
+
+        target_ota = st.session_state["selected_device"]
+        btn_ota_label = f"🚀 Push OTA to `{target_ota}`" if target_ota != "All Devices" else "🚀 Push OTA to Fleet"
+
+        if st.button(btn_ota_label, key="btn_sb_push_ota", disabled=not os.path.exists(ota_file), type="primary"):
+            import paho.mqtt.client as mqtt
+            import json
+            try:
+                mqtt_broker_host = os.getenv("MQTT_HOST", "172.16.40.129")
+                mqtt_broker_port = int(os.getenv("MQTT_PORT", "1883"))
+                mqttc = mqtt.Client()
+                mqttc.connect(mqtt_broker_host, mqtt_broker_port, 5)
+                ota_payload = json.dumps({
+                    "cmd": "update",
+                    "resource": "ota/firmware.bin",
+                    "port": 5000
+                })
+                topic = f"factory/{target_ota}/cmd/ota" if target_ota != "All Devices" else "factory/all/cmd/ota"
+                mqttc.publish(topic, ota_payload)
+                mqttc.disconnect()
+                st.toast(f"OTA signal published to {topic}!")
+                st.info(f"📡 Sent OTA update signal to `{topic}`. Target device is downloading `firmware.bin` and flashing slot B (~10s)...")
+            except Exception as ex:
+                st.error(f"Failed to send MQTT OTA command: {ex}")
+
+    st.markdown("---")
     with st.expander("🗑️ Database & Data Wipe Manager", expanded=False):
         target_dev = st.session_state["selected_device"]
         dev_label = f"Device `{target_dev}`" if target_dev != "All Devices" else "ALL Fleet Devices"
@@ -246,45 +284,6 @@ with st.sidebar:
             conn.close()
             st.toast(f"Wiped anomaly records and audio for {dev_label}.")
             st.rerun()
-
-        st.markdown("---")
-        
-        # ------------------ OVER-THE-AIR (OTA) FIRMWARE MANAGER ------------------
-        with st.expander("📡 Over-The-Air (OTA) Updates", expanded=False):
-            st.markdown("##### Remotely push new firmware over Wi-Fi:")
-            ota_dir = os.path.join(BASE_DIR, "static", "ota")
-            ota_file = os.path.join(ota_dir, "firmware.bin")
-
-            if os.path.exists(ota_file):
-                ota_stat = os.stat(ota_file)
-                st.success(f"**Staged:** `firmware.bin` ({ota_stat.st_size / (1024*1024):.2f} MB)")
-                st.caption(f"Compiled/Staged: {datetime.datetime.fromtimestamp(ota_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
-            else:
-                st.warning("⚠️ No `firmware.bin` staged yet.\nRun `./build.sh --deploy-ota`.")
-
-            target_ota = st.session_state["selected_device"]
-            btn_ota_label = f"🚀 Push OTA to `{target_ota}`" if target_ota != "All Devices" else "🚀 Push OTA to Fleet"
-
-            if st.button(btn_ota_label, key="btn_sb_push_ota", disabled=not os.path.exists(ota_file), type="primary"):
-                import paho.mqtt.client as mqtt
-                import json
-                try:
-                    mqtt_broker_host = os.getenv("MQTT_HOST", "172.16.40.129")
-                    mqtt_broker_port = int(os.getenv("MQTT_PORT", "1883"))
-                    mqttc = mqtt.Client()
-                    mqttc.connect(mqtt_broker_host, mqtt_broker_port, 5)
-                    ota_payload = json.dumps({
-                        "cmd": "update",
-                        "resource": "ota/firmware.bin",
-                        "port": 5000
-                    })
-                    topic = f"factory/{target_ota}/cmd/ota" if target_ota != "All Devices" else "factory/all/cmd/ota"
-                    mqttc.publish(topic, ota_payload)
-                    mqttc.disconnect()
-                    st.toast(f"OTA signal published to {topic}!")
-                    st.info(f"📡 Sent OTA update signal to `{topic}`. Target device is downloading `firmware.bin` and flashing slot B (~10s)...")
-                except Exception as ex:
-                    st.error(f"Failed to send MQTT OTA command: {ex}")
 
         st.markdown("---")
         confirm_full_purge = st.checkbox("Confirm: Wipe Entire Database & Reset All Baselines", key="confirm_full_purge")
