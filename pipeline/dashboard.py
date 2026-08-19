@@ -141,7 +141,7 @@ with st.sidebar:
     enable_fragment_sync = st.checkbox("Enable Background Auto-Sync (Non-Blocking)", value=False, key="cb_fragment_sync", help="Uses Streamlit fragments to update charts silently in the background without freezing your inputs or audio playback.")
 
     st.markdown("---")
-    st.subheader("🔍 Telemetry Filtering Controls")
+    st.subheader("🔍 Telemetry & Event Filtering")
     time_filter = st.selectbox(
         "⏱️ Time Window Filter:",
         options=["All Time", "Last 1 Hour", "Last 6 Hours", "Last 24 Hours", "Last 7 Days"],
@@ -149,6 +149,24 @@ with st.sidebar:
         key="sidebar_time_filter"
     )
     
+    # Classification Type Filter
+    available_classes = ["All Classes"] + DEFAULT_CLASSES + ["Ignored / False Positive"]
+    class_filter = st.selectbox(
+        "🏷️ Classification Filter:",
+        options=available_classes,
+        index=0,
+        key="sidebar_class_filter",
+        help="Filter events by their verified or model-predicted classification category."
+    )
+
+    # Verification Review Toggle
+    only_unverified = st.toggle(
+        "⚡ Only Unverified (Pending Review)",
+        value=False,
+        key="sidebar_only_unverified",
+        help="Filter list to only show events that have not yet been confirmed or labeled by an operator."
+    )
+
     min_amp_filter = st.slider(
         "🔊 Min Amplitude Threshold:",
         min_value=0,
@@ -173,6 +191,22 @@ with st.sidebar:
             raw_df = raw_df[raw_df['peak_amplitude'] >= min_amp_filter]
         if not raw_stream_df.empty and 'peak_amplitude' in raw_stream_df.columns:
             raw_stream_df = raw_stream_df[raw_stream_df['peak_amplitude'] >= min_amp_filter]
+
+    # Verification Status Filter (Only Unverified / Pending Review)
+    if only_unverified and not raw_df.empty:
+        if 'verified_label' in raw_df.columns:
+            unverified_mask = raw_df['verified_label'].isna() | raw_df['verified_label'].astype(str).str.strip().isin(['', 'Non-Classified', 'None', 'nan', 'Unknown'])
+            raw_df = raw_df[unverified_mask]
+
+    # Classification Type Filter
+    if class_filter != "All Classes" and not raw_df.empty:
+        def match_class(row):
+            v_lbl = str(row.get('verified_label') or '').strip()
+            p_cls = str(row.get('predicted_class') or '').strip()
+            effective = v_lbl if (v_lbl and v_lbl not in ['None', 'Non-Classified', 'nan', 'Unknown', '']) else p_cls
+            return effective == class_filter
+
+        raw_df = raw_df[raw_df.apply(match_class, axis=1)]
 
     # Active dataset based on selection (honoring time window & amplitude filters)
     if st.session_state["selected_device"] == "All Devices":
@@ -592,8 +626,31 @@ with tab_events:
     st.subheader(f"🎧 {view_title} & Classification")
     st.caption("Review captured anomalies, play back audio, inspect spectrograms, and perform single or bulk label/deletion actions.")
 
+    # Active Filters Banner
+    active_filters = []
+    if only_unverified:
+        active_filters.append("⚡ Unverified (Pending Review)")
+    if class_filter != "All Classes":
+        active_filters.append(f"🏷️ Class: {class_filter}")
+    if time_filter != "All Time":
+        active_filters.append(f"⏱️ {time_filter}")
+    if min_amp_filter > 0:
+        active_filters.append(f"🔊 Min Amplitude: {min_amp_filter}")
+
+    if active_filters:
+        c_filt1, c_filt2 = st.columns([4, 1])
+        with c_filt1:
+            st.info(f"🔍 **Active Filter Scope:** {' • '.join(active_filters)} (Showing **{len(df)}** matching events)")
+        with c_filt2:
+            if st.button("🔄 Reset Filters", key="btn_reset_filters_top"):
+                st.session_state["sidebar_time_filter"] = "All Time"
+                st.session_state["sidebar_class_filter"] = "All Classes"
+                st.session_state["sidebar_only_unverified"] = False
+                st.session_state["sidebar_min_amp_filter"] = 0
+                st.rerun()
+
     if df.empty:
-        st.info("No recorded audio anomaly events in this view yet. Continuous 30-second telemetry heartbeats are streaming under the 'Trends' and 'Logs' tabs.")
+        st.info("No recorded audio anomaly events matching the current filters. Adjust your filter criteria in the sidebar.")
     else:
         # ------------------ MASS DELETION & BULK ACTION BAR ------------------
         with st.expander("🛠️ Bulk Actions & Mass Deletion Manager", expanded=False):
