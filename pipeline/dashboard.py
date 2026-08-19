@@ -185,14 +185,17 @@ with st.sidebar:
     total_events = len(df)
     labeled_count = 0
     if not df.empty and 'verified_label' in df.columns:
-        labeled_count = int(df['verified_label'].dropna().apply(lambda x: 1 if str(x).strip() and str(x) not in ['Ignored / False Positive', 'Non-Classified', 'Unknown'] else 0).sum())
+        valid_mask = df['verified_label'].dropna().astype(str).str.strip().apply(
+            lambda x: bool(x) and x not in ['Ignored / False Positive', 'Non-Classified', 'Unknown', 'None', 'nan', '']
+        )
+        labeled_count = int(valid_mask.sum()) if not valid_mask.empty else 0
     
     st.metric("Events in View", total_events)
     st.metric("Active ML Training Labels", labeled_count)
 
     if not df.empty and 'verified_label' in df.columns and labeled_count > 0:
-        valid_labels = df['verified_label'].dropna()
-        valid_labels = valid_labels[~valid_labels.isin(['Ignored / False Positive', 'Non-Classified', 'Unknown'])]
+        valid_labels = df['verified_label'].dropna().astype(str).str.strip()
+        valid_labels = valid_labels[~valid_labels.isin(['Ignored / False Positive', 'Non-Classified', 'Unknown', 'None', 'nan', ''])]
         if not valid_labels.empty:
             label_dist = valid_labels.value_counts()
             st.caption("Verified Class Distribution:")
