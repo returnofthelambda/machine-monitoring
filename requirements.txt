@@ -43,7 +43,7 @@ tenacity==9.1.4
 threadpoolctl==3.6.0
 toml==0.10.2
 typing_extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.3
 watchdog==6.0.0
 websockets==16.1.1
