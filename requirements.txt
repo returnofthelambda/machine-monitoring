@@ -47,4 +47,4 @@ urllib3==2.7.0
 uvicorn==0.52.3
 watchdog==6.0.0
 websockets==16.1.1
-Werkzeug==3.1.8
+Werkzeug==3.1.9
